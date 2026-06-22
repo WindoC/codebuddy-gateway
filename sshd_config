@@ -1,0 +1,23 @@
+Port 22
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+PermitRootLogin no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+
+X11Forwarding no
+AllowTcpForwarding yes
+PermitTTY yes
+
+ClientAliveInterval 120
+ClientAliveCountMax 3
+
+AcceptEnv LANG LC_* CODEBUDDY_API_KEY CODEBUDDY_BASE_URL
+
+Subsystem sftp /usr/lib/openssh/sftp-server
