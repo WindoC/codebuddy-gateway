@@ -1,0 +1,14 @@
+{
+  "name": "codebuddy-gateway",
+  "version": "0.1.0",
+  "description": "OpenAI-compatible REST API gateway backed by CodeBuddy Agent SDK",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@tencent-ai/agent-sdk": "^0.1.0"
+  }
+}

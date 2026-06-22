@@ -3,9 +3,42 @@
 Node 22 based container image with:
 - OpenSSH server
 - CodeBuddy Code CLI (`codebuddy` / `cbc`)
+- **OpenAI-compatible REST API** (powered by CodeBuddy Agent SDK)
 
-It allows another user/container to SSH in and run CodeBuddy from stdin/stdout.
+It allows another user/container to SSH in and run CodeBuddy from stdin/stdout, **or** call it via a standard OpenAI-compatible HTTP API.
+
 The image creates a default `codebuddy` user at build time and uses `/home/codebuddy` as a persistent volume.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                   ssh-codebuddy 容器                      │
+│                                                          │
+│  ┌─────────────┐    ┌──────────────────────────────────┐ │
+│  │  SSH Daemon  │    │  codebuddy-gateway (REST API)   │ │
+│  │  (port 22)   │    │       (port 10532)              │ │
+│  │              │    │                                  │ │
+│  │  codebuddy   │    │  POST /v1/chat/completions      │ │
+│  │  codebuddy-  │    │  GET  /v1/models                │ │
+│  │  stdin       │    │  GET  /health                   │ │
+│  └──────┬───────┘    └────────────┬─────────────────────┘ │
+│         │                         │                       │
+│         └────────┬────────────────┘                       │
+│                  │                                        │
+│          ┌───────▼────────┐                              │
+│          │  CodeBuddy      │                              │
+│          │  Agent SDK      │                              │
+│          │  (@tencent-ai/  │                              │
+│          │   agent-sdk)    │                              │
+│          └────────────────┘                              │
+│                  │                                        │
+│          ┌───────▼────────┐                              │
+│          │  .codebuddy/    │                              │
+│          │  (凭证/会话)     │                              │
+│          └────────────────┘                              │
+└──────────────────────────────────────────────────────────┘
+```
 
 ## Build
 
@@ -24,22 +57,35 @@ registry.windo.me/tools/ssh-codebuddy
 ```bash
 docker run -d --name ssh-codebuddy \
   -p 2222:22 \
+  -p 10532:10532 \
   -e SSH_PASSWORD=codebuddy \
   -v codebuddy-home:/home/codebuddy \
   registry.windo.me/tools/ssh-codebuddy:latest
 ```
 
-Optional environment variables:
+### Environment variables
 
-| Variable | Description |
-|---|---|
-| `CODEBUDDY_API_KEY` | CodeBuddy API key, saved to `~/.codebuddy/env.sh` |
-| `CODEBUDDY_BASE_URL` | Custom API endpoint, saved to `~/.codebuddy/env.sh` |
+| Variable | Default | Description |
+|---|---|---|
+| `SSH_PASSWORD` | `codebuddy` | SSH password for the `codebuddy` user |
+| `SSH_PUBLIC_KEY` | — | SSH public key for key-based auth |
+| `CODEBUDDY_API_KEY` | — | CodeBuddy API key, saved to `~/.codebuddy/env.sh` |
+
+| `CODEBUDDY_GATEWAY_ENABLED` | `true` | Enable the OpenAI-compatible REST API |
+| `CODEBUDDY_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
+| `CODEBUDDY_GATEWAY_PORT` | `10532` | Gateway listen port |
+| `CODEBUDDY_GATEWAY_TOOLS` | `Read,Grep,WebSearch,Bash` | Allowed tools (comma-separated) |
+| `CODEBUDDY_GATEWAY_DISALLOWED_TOOLS` | `Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)` | Disallowed tools |
+| `CODEBUDDY_GATEWAY_MODEL` | — | Model override |
+| `CODEBUDDY_GATEWAY_MAX_TURNS` | `30` | Max conversation turns |
+| `CODEBUDDY_GATEWAY_TIMEOUT` | `300000` | Request timeout in ms |
 
 These env vars are auto-loaded on SSH login via `.bashrc`, `.profile`, and `.bash_profile`.
 If the home volume already has files, startup keeps existing files and only creates missing ones.
 
-## SSH and use CodeBuddy
+---
+
+## Usage — SSH (CLI)
 
 ### Interactive CLI
 
@@ -82,6 +128,87 @@ echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"
   'codebuddy -p --input-format stream-json --output-format stream-json -y'
 ```
 
+---
+
+## Usage — REST API (OpenAI-compatible)
+
+The gateway exposes an OpenAI-compatible HTTP API on port `10532`.
+
+### Chat Completions (non-streaming)
+
+```bash
+curl -s http://127.0.0.1:10532/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codebuddy",
+    "messages": [
+      {"role": "user", "content": "用中文解释什么是 Docker"}
+    ]
+  }'
+```
+
+### Chat Completions (streaming)
+
+```bash
+curl -s http://127.0.0.1:10532/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codebuddy",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Write a Python function to reverse a linked list"}
+    ]
+  }'
+```
+
+### List Models
+
+```bash
+curl -s http://127.0.0.1:10532/v1/models
+```
+
+### Health Check
+
+```bash
+curl -s http://127.0.0.1:10532/health
+```
+
+### Using with OpenAI SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:10532/v1",
+    api_key="not-needed"  # authentication is handled at the container level
+)
+
+response = client.chat.completions.create(
+    model="codebuddy",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)
+```
+
+### Using with Vercel AI SDK
+
+```typescript
+import { generateText } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
+
+const codebuddy = createOpenAI({
+  baseURL: "http://127.0.0.1:10532/v1",
+  apiKey: "not-needed",
+});
+
+const { text } = await generateText({
+  model: codebuddy("codebuddy"),
+  prompt: "Explain monads in simple terms",
+});
+```
+
+---
+
 ## Optional: SSH public key auth
 
 Pass `SSH_PUBLIC_KEY` on container start:
@@ -89,6 +216,7 @@ Pass `SSH_PUBLIC_KEY` on container start:
 ```bash
 docker run -d --name ssh-codebuddy \
   -p 2222:22 \
+  -p 10532:10532 \
   -e SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)" \
   -v codebuddy-home:/home/codebuddy \
   registry.windo.me/tools/ssh-codebuddy:latest
@@ -110,18 +238,30 @@ Use [k8s-ssh-codebuddy.yaml](k8s-ssh-codebuddy.yaml):
 kubectl apply -f k8s-ssh-codebuddy.yaml
 ```
 
-For external SSH access, either:
-- use `kubectl port-forward svc/ssh-codebuddy 2222:22`
-- or change the Service type to `NodePort` / `LoadBalancer` based on your cluster setup
+For external access:
+- **SSH**: `kubectl port-forward svc/ssh-codebuddy 2222:22`
+- **API**: `kubectl port-forward svc/ssh-codebuddy 10532:10532`
+- Or change the Service type to `NodePort` / `LoadBalancer`
 
-## Differences from ssh-gemini
+---
 
-| Aspect | ssh-gemini | ssh-codebuddy |
-|---|---|---|
-| CLI tool | `@google/gemini-cli` | `@tencent-ai/codebuddy-code` |
-| User | `gemini` | `codebuddy` |
-| Home | `/home/gemini` | `/home/codebuddy` |
-| Env file | `.gemini/env.sh` | `.codebuddy/env.sh` |
-| Stdin wrapper | `gemini-stdin` | `codebuddy-stdin` |
-| Non-interactive flag | `-p` | `-p -y` (headless + skip permissions) |
-| Default port | 2222 | 2222 |
+## Gateway Design
+
+The `codebuddy-gateway` (at `/opt/codebuddy-gateway/server.mjs`) is a lightweight Node.js HTTP server that:
+
+1. Receives OpenAI-format `/v1/chat/completions` requests
+2. Converts them to prompts for the **CodeBuddy Agent SDK** (`@tencent-ai/agent-sdk`)
+3. Streams or collects the response back in OpenAI format
+4. Supports both streaming and non-streaming modes
+
+The gateway uses the **Agent SDK** as the bridge layer — the SDK manages the CLI process, authentication, tool execution, and message streaming internally.
+
+### Safety
+
+The gateway runs with restricted tools by default:
+- Allowed: `Read`, `Grep`, `WebSearch`, `Bash`
+- Disallowed: `Bash(git commit)`, `Bash(git push)`, `Bash(rm)`, `Bash(sudo)`
+
+Adjust `CODEBUDDY_GATEWAY_TOOLS` / `CODEBUDDY_GATEWAY_DISALLOWED_TOOLS` to fit your security requirements.
+
+

@@ -4,11 +4,21 @@ services:
     container_name: ssh-codebuddy
     restart: unless-stopped
     ports:
-      - "2222:22"
+      - "2222:22"       # SSH
+      - "10532:10532"   # OpenAI-compatible REST API
     environment:
       SSH_PASSWORD: "change-me"
       # CODEBUDDY_API_KEY: "your-api-key"
-      # CODEBUDDY_BASE_URL: "https://your-custom-endpoint"
+
+      # Gateway settings
+      CODEBUDDY_GATEWAY_ENABLED: "true"
+      # CODEBUDDY_GATEWAY_HOST: "0.0.0.0"
+      # CODEBUDDY_GATEWAY_PORT: "10532"
+      # CODEBUDDY_GATEWAY_TOOLS: "Read,Grep,WebSearch,Bash"
+      # CODEBUDDY_GATEWAY_DISALLOWED_TOOLS: "Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)"
+      # CODEBUDDY_GATEWAY_MODEL: ""
+      # CODEBUDDY_GATEWAY_MAX_TURNS: "30"
+      # CODEBUDDY_GATEWAY_TIMEOUT: "300000"
     volumes:
       - codebuddy-home:/home/codebuddy
 

@@ -6,6 +6,12 @@ USER_HOME="/home/${SSH_USER}"
 SSH_PASSWORD="${SSH_PASSWORD:-codebuddy}"
 ENV_FILE="${USER_HOME}/.codebuddy/env.sh"
 
+# Gateway settings
+GATEWAY_ENABLED="${CODEBUDDY_GATEWAY_ENABLED:-true}"
+GATEWAY_HOST="${CODEBUDDY_GATEWAY_HOST:-0.0.0.0}"
+GATEWAY_PORT="${CODEBUDDY_GATEWAY_PORT:-10532}"
+GATEWAY_DIR="/opt/codebuddy-gateway"
+
 ensure_file() {
   local path="$1"
   if [[ ! -f "${path}" ]]; then
@@ -25,6 +31,36 @@ if [ -f "$HOME/.codebuddy/env.sh" ]; then
 fi
 EOF
   fi
+}
+
+start_gateway() {
+  echo "Starting codebuddy-gateway on ${GATEWAY_HOST}:${GATEWAY_PORT}..."
+
+  # Build env vars to pass through to the gateway process.
+  local -a pass_env=()
+  if [[ -n "${CODEBUDDY_API_KEY:-}" ]]; then
+    pass_env+=("CODEBUDDY_API_KEY=${CODEBUDDY_API_KEY}")
+  fi
+  # Point SDK to the system-installed CLI so it can read local auth files.
+  # Without this the SDK spawns its bundled CLI which targets a different API.
+  pass_env+=("CODEBUDDY_CODE_PATH=/usr/local/bin/codebuddy")
+
+  while true; do
+    cd "${GATEWAY_DIR}"
+    runuser -u "${SSH_USER}" -- \
+      env HOME="${USER_HOME}" \
+        "${pass_env[@]}" \
+        CODEBUDDY_GATEWAY_HOST="${GATEWAY_HOST}" \
+        CODEBUDDY_GATEWAY_PORT="${GATEWAY_PORT}" \
+        CODEBUDDY_GATEWAY_TOOLS="${CODEBUDDY_GATEWAY_TOOLS:-Read,Grep,WebSearch,Bash}" \
+        CODEBUDDY_GATEWAY_DISALLOWED_TOOLS="${CODEBUDDY_GATEWAY_DISALLOWED_TOOLS:-Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)}" \
+        CODEBUDDY_GATEWAY_MODEL="${CODEBUDDY_GATEWAY_MODEL:-}" \
+        CODEBUDDY_GATEWAY_MAX_TURNS="${CODEBUDDY_GATEWAY_MAX_TURNS:-30}" \
+        CODEBUDDY_GATEWAY_TIMEOUT="${CODEBUDDY_GATEWAY_TIMEOUT:-300000}" \
+        node server.mjs
+    echo "codebuddy-gateway exited, restarting in 5s..."
+    sleep 5
+  done
 }
 
 mkdir -p "${USER_HOME}" "${USER_HOME}/.ssh" "${USER_HOME}/.codebuddy" /var/run/sshd
@@ -50,11 +86,6 @@ if [[ -n "${CODEBUDDY_API_KEY:-}" ]]; then
   printf 'export CODEBUDDY_API_KEY=%q\n' "${CODEBUDDY_API_KEY}" >> "${ENV_FILE}"
 fi
 
-if [[ -n "${CODEBUDDY_BASE_URL:-}" ]]; then
-  sed -i '/^export CODEBUDDY_BASE_URL=/d' "${ENV_FILE}"
-  printf 'export CODEBUDDY_BASE_URL=%q\n' "${CODEBUDDY_BASE_URL}" >> "${ENV_FILE}"
-fi
-
 echo "${SSH_USER}:${SSH_PASSWORD}" | chpasswd
 
 if [[ -n "${SSH_PUBLIC_KEY:-}" ]]; then
@@ -74,6 +105,11 @@ chown -R "${SSH_USER}:${SSH_USER}" "${USER_HOME}"
 
 if [[ ! -f /etc/ssh/ssh_host_rsa_key ]]; then
   ssh-keygen -A
+fi
+
+# Start gateway in background if enabled
+if [[ "${GATEWAY_ENABLED,,}" == "true" ]]; then
+  start_gateway &
 fi
 
 exec /usr/sbin/sshd -D -e

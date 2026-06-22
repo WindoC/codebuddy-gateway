@@ -18,6 +18,6 @@ PermitTTY yes
 ClientAliveInterval 120
 ClientAliveCountMax 3
 
-AcceptEnv LANG LC_* CODEBUDDY_API_KEY CODEBUDDY_BASE_URL
+AcceptEnv LANG LC_* CODEBUDDY_API_KEY
 
 Subsystem sftp /usr/lib/openssh/sftp-server

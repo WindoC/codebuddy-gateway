@@ -39,6 +39,8 @@ spec:
           ports:
             - containerPort: 22
               name: ssh
+            - containerPort: 10532
+              name: api
           env:
             - name: SSH_PASSWORD
               valueFrom:
@@ -50,6 +52,8 @@ spec:
             #     secretKeyRef:
             #       name: ssh-codebuddy-secret
             #       key: CODEBUDDY_API_KEY
+            - name: CODEBUDDY_GATEWAY_ENABLED
+              value: "true"
           volumeMounts:
             - name: codebuddy-home
               mountPath: /home/codebuddy
@@ -70,3 +74,6 @@ spec:
     - name: ssh
       port: 22
       targetPort: 22
+    - name: api
+      port: 10532
+      targetPort: 10532
