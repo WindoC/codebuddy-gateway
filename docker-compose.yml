@@ -1,0 +1,16 @@
+services:
+  ssh-codebuddy:
+    image: registry.windo.me/tools/ssh-codebuddy:latest
+    container_name: ssh-codebuddy
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+    environment:
+      SSH_PASSWORD: "change-me"
+      # CODEBUDDY_API_KEY: "your-api-key"
+      # CODEBUDDY_BASE_URL: "https://your-custom-endpoint"
+    volumes:
+      - codebuddy-home:/home/codebuddy
+
+volumes:
+  codebuddy-home:

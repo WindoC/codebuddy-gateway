@@ -1,0 +1,21 @@
+stages:
+  - build
+
+docker-build:
+  image: docker:latest
+  stage: build
+  timeout: 2h
+  tags:
+    - docker
+  services:
+    - name: docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - |
+      tag=":$CI_COMMIT_TAG"
+      echo "Running on tag '$CI_COMMIT_TAG': tag = $tag"
+    - docker buildx create --name container-builder --driver docker-container --use --bootstrap
+    - docker buildx build --file Dockerfile --output "type=image,push=true" --provenance=false --platform linux/amd64,linux/arm64/v8 --tag "$CI_REGISTRY_IMAGE${tag}" --tag "$CI_REGISTRY_IMAGE:latest" .
+  rules:
+    - if: $CI_COMMIT_TAG
