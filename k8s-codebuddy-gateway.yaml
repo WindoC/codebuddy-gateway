@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: ssh-codebuddy-secret
+  name: codebuddy-gateway-secret
 type: Opaque
 stringData:
   SSH_PASSWORD: "change-me"
@@ -10,7 +10,7 @@ stringData:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ssh-codebuddy-home-pvc
+  name: codebuddy-gateway-home-pvc
 spec:
   accessModes:
     - ReadWriteOnce
@@ -21,52 +21,59 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ssh-codebuddy
+  name: codebuddy-gateway
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ssh-codebuddy
+      app: codebuddy-gateway
   template:
     metadata:
       labels:
-        app: ssh-codebuddy
+        app: codebuddy-gateway
     spec:
       containers:
-        - name: ssh-codebuddy
-          image: registry.windo.me/tools/ssh-codebuddy:latest
+        - name: codebuddy-gateway
+          image: registry.windo.me/tools/codebuddy-gateway:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 22
               name: ssh
+            - containerPort: 10532
+              name: api
           env:
             - name: SSH_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: ssh-codebuddy-secret
+                  name: codebuddy-gateway-secret
                   key: SSH_PASSWORD
             # - name: CODEBUDDY_API_KEY
             #   valueFrom:
             #     secretKeyRef:
-            #       name: ssh-codebuddy-secret
+            #       name: codebuddy-gateway-secret
             #       key: CODEBUDDY_API_KEY
+            - name: CODEBUDDY_GATEWAY_ENABLED
+              value: "true"
           volumeMounts:
             - name: codebuddy-home
               mountPath: /home/codebuddy
       volumes:
         - name: codebuddy-home
           persistentVolumeClaim:
-            claimName: ssh-codebuddy-home-pvc
+            claimName: codebuddy-gateway-home-pvc
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: ssh-codebuddy
+  name: codebuddy-gateway
 spec:
   type: ClusterIP
   selector:
-    app: ssh-codebuddy
+    app: codebuddy-gateway
   ports:
     - name: ssh
       port: 22
       targetPort: 22
+    - name: api
+      port: 10532
+      targetPort: 10532
