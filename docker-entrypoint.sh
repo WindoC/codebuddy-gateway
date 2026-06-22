@@ -21,11 +21,11 @@ ensure_file() {
 
 ensure_source_env() {
   local path="$1"
-  local marker="# ssh-codebuddy env"
+  local marker="# codebuddy-gateway env"
   if ! grep -Fq "${marker}" "${path}"; then
     cat >> "${path}" <<'EOF'
 
-# ssh-codebuddy env
+# codebuddy-gateway env
 if [ -f "$HOME/.codebuddy/env.sh" ]; then
   . "$HOME/.codebuddy/env.sh"
 fi

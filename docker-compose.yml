@@ -1,7 +1,7 @@
 services:
-  ssh-codebuddy:
-    image: registry.windo.me/tools/ssh-codebuddy:latest
-    container_name: ssh-codebuddy
+  codebuddy-gateway:
+    image: registry.windo.me/tools/codebuddy-gateway:latest
+    container_name: codebuddy-gateway
     restart: unless-stopped
     ports:
       - "2222:22"       # SSH

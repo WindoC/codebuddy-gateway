@@ -1,4 +1,4 @@
-# ssh-codebuddy
+# codebuddy-gateway
 
 Node 22 based container image with:
 - OpenSSH server
@@ -13,7 +13,7 @@ The image creates a default `codebuddy` user at build time and uses `/home/codeb
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                   ssh-codebuddy 容器                      │
+│                   codebuddy-gateway 容器                 │
 │                                                          │
 │  ┌─────────────┐    ┌──────────────────────────────────┐ │
 │  │  SSH Daemon  │    │  codebuddy-gateway (REST API)   │ │
@@ -43,24 +43,24 @@ The image creates a default `codebuddy` user at build time and uses `/home/codeb
 ## Build
 
 ```bash
-docker build -t ssh-codebuddy:latest .
+docker build -t codebuddy-gateway:latest .
 ```
 
 GitLab CI/CD publishes image to:
 
 ```text
-registry.windo.me/tools/ssh-codebuddy
+registry.windo.me/tools/codebuddy-gateway
 ```
 
 ## Run
 
 ```bash
-docker run -d --name ssh-codebuddy \
+docker run -d --name codebuddy-gateway \
   -p 2222:22 \
   -p 10532:10532 \
   -e SSH_PASSWORD=codebuddy \
   -v codebuddy-home:/home/codebuddy \
-  registry.windo.me/tools/ssh-codebuddy:latest
+  registry.windo.me/tools/codebuddy-gateway:latest
 ```
 
 ### Environment variables
@@ -214,12 +214,12 @@ const { text } = await generateText({
 Pass `SSH_PUBLIC_KEY` on container start:
 
 ```bash
-docker run -d --name ssh-codebuddy \
+docker run -d --name codebuddy-gateway \
   -p 2222:22 \
   -p 10532:10532 \
   -e SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)" \
   -v codebuddy-home:/home/codebuddy \
-  registry.windo.me/tools/ssh-codebuddy:latest
+  registry.windo.me/tools/codebuddy-gateway:latest
 ```
 
 ## Docker Compose
@@ -232,15 +232,15 @@ docker compose up -d
 
 ## Kubernetes
 
-Use [k8s-ssh-codebuddy.yaml](k8s-ssh-codebuddy.yaml):
+Use [k8s-codebuddy-gateway.yaml](k8s-codebuddy-gateway.yaml):
 
 ```bash
-kubectl apply -f k8s-ssh-codebuddy.yaml
+kubectl apply -f k8s-codebuddy-gateway.yaml
 ```
 
 For external access:
-- **SSH**: `kubectl port-forward svc/ssh-codebuddy 2222:22`
-- **API**: `kubectl port-forward svc/ssh-codebuddy 10532:10532`
+- **SSH**: `kubectl port-forward svc/codebuddy-gateway 2222:22`
+- **API**: `kubectl port-forward svc/codebuddy-gateway 10532:10532`
 - Or change the Service type to `NodePort` / `LoadBalancer`
 
 ---
