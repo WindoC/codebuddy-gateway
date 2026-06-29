@@ -70,7 +70,6 @@ docker run -d --name codebuddy-gateway \
 | `SSH_PASSWORD` | `codebuddy` | SSH password for the `codebuddy` user |
 | `SSH_PUBLIC_KEY` | — | SSH public key for key-based auth |
 | `CODEBUDDY_API_KEY` | — | CodeBuddy API key, saved to `~/.codebuddy/env.sh` |
-
 | `CODEBUDDY_GATEWAY_ENABLED` | `true` | Enable the OpenAI-compatible REST API |
 | `CODEBUDDY_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `CODEBUDDY_GATEWAY_PORT` | `10532` | Gateway listen port |
