@@ -34,7 +34,7 @@ RUN set -eux; \
     chown -R codebuddy:codebuddy /home/codebuddy
 
 # Install gateway dependencies (uses @tencent-ai/agent-sdk)
-COPY gateway/package.json /opt/codebuddy-gateway/package.json
+COPY gateway/package*.json /opt/codebuddy-gateway/
 WORKDIR /opt/codebuddy-gateway
 RUN npm install --omit=dev
 COPY gateway/server.mjs /opt/codebuddy-gateway/server.mjs

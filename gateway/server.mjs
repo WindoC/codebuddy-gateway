@@ -1,16 +1,22 @@
 import http from 'node:http';
-import { query } from '@tencent-ai/agent-sdk';
+import { existsSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { createSdkMcpServer, query, tool } from '@tencent-ai/agent-sdk';
+import { z } from 'zod';
+
+const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 // ---------------------------------------------------------------------------
 // Configuration (env vars, with sensible defaults)
 // ---------------------------------------------------------------------------
 const HOST = process.env.CODEBUDDY_GATEWAY_HOST || '0.0.0.0';
 const PORT = parseInt(process.env.CODEBUDDY_GATEWAY_PORT || '10532', 10);
-const ALLOWED_TOOLS = (process.env.CODEBUDDY_GATEWAY_TOOLS || 'Read,Grep,WebSearch,Bash').split(',');
-const DISALLOWED_TOOLS = (process.env.CODEBUDDY_GATEWAY_DISALLOWED_TOOLS || 'Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)').split(',');
+const BUILTIN_TOOLS = parseCsv(process.env.CODEBUDDY_GATEWAY_TOOLS || '');
+const DISALLOWED_TOOLS = parseCsv(process.env.CODEBUDDY_GATEWAY_DISALLOWED_TOOLS || 'Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)');
 const MODEL = process.env.CODEBUDDY_GATEWAY_MODEL || undefined;
 const MAX_TURNS = parseInt(process.env.CODEBUDDY_GATEWAY_MAX_TURNS || '30', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_GATEWAY_TIMEOUT || '300000', 10);
+const EXTERNAL_TOOL_SERVER_NAME = 'openai_client_tools';
 
 // Build the env object to pass through to the SDK.
 // The SDK will spawn a CLI subprocess; these env vars control its behaviour.
@@ -29,14 +35,24 @@ for (const key of ['CODEBUDDY_API_KEY', 'CODEBUDDY_CODE_PATH']) {
 // the SDK.  The bundled CLI targets a different API endpoint and cannot use
 // auth files created by the system-installed CLI.
 if (!SDK_ENV.CODEBUDDY_CODE_PATH) {
-  SDK_ENV.CODEBUDDY_CODE_PATH = '/usr/local/bin/codebuddy';
+  const globalCodebuddyBin = '/usr/local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy';
+  SDK_ENV.CODEBUDDY_CODE_PATH = existsSync(globalCodebuddyBin) ? globalCodebuddyBin : '/usr/local/bin/codebuddy';
 }
 
-console.log(`[auth] SDK_ENV keys: ${Object.keys(SDK_ENV).join(', ') || '(none)'}`);
+if (IS_MAIN) {
+  console.log(`[auth] SDK_ENV keys: ${Object.keys(SDK_ENV).join(', ') || '(none)'}`);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+export function parseCsv(value) {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
@@ -52,12 +68,22 @@ function readBody(req) {
 }
 
 /** Convert OpenAI ChatCompletion request → plain-text prompt for CodeBuddy SDK */
-function messagesToPrompt(messages) {
+export function messagesToPrompt(messages) {
   return messages
     .map((m) => {
+      if (m.role === 'tool') {
+        const toolName = m.name || m.tool_call_id || 'unknown';
+        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '');
+        return `[Tool Result: ${toolName}]: ${text}`;
+      }
+
       const role = m.role === 'assistant' ? 'Assistant' : m.role === 'system' ? 'System' : 'User';
-      const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-      return `[${role}]: ${text}`;
+      const content = m.content == null ? '' : m.content;
+      const text = typeof content === 'string' ? content : JSON.stringify(content);
+      const toolCalls = Array.isArray(m.tool_calls) && m.tool_calls.length > 0
+        ? `\nTool calls made by Assistant: ${JSON.stringify(m.tool_calls)}`
+        : '';
+      return `[${role}]: ${text}${toolCalls}`;
     })
     .join('\n\n');
 }
@@ -75,6 +101,169 @@ function sseEvent(event, data) {
 function isAuthError(err) {
   const msg = err?.message || String(err);
   return /401|authentication required|please.*login|sign in|unauthorized/i.test(msg);
+}
+
+function isAbortError(err) {
+  return err?.name === 'AbortError' || /aborted|abort/i.test(err?.message || String(err));
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function normalizeOpenAiTools(tools) {
+  if (!Array.isArray(tools)) return [];
+
+  return tools
+    .filter((item) => item?.type === 'function' && isObject(item.function) && item.function.name)
+    .map((item) => ({
+      name: String(item.function.name),
+      description: String(item.function.description || ''),
+      parameters: isObject(item.function.parameters) ? item.function.parameters : { type: 'object', properties: {} },
+    }));
+}
+
+export function jsonSchemaToZod(schema, required = false) {
+  if (!isObject(schema)) {
+    return required ? z.any() : z.any().optional();
+  }
+
+  let result;
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    result = z.enum(schema.enum.map((value) => String(value)));
+  } else {
+    const type = Array.isArray(schema.type) ? schema.type.find((item) => item !== 'null') : schema.type;
+    switch (type) {
+      case 'string':
+        result = z.string();
+        break;
+      case 'integer':
+        result = z.number().int();
+        break;
+      case 'number':
+        result = z.number();
+        break;
+      case 'boolean':
+        result = z.boolean();
+        break;
+      case 'array':
+        result = z.array(jsonSchemaToZod(schema.items || {}, true));
+        break;
+      case 'object': {
+        const shape = jsonSchemaObjectToZodShape(schema);
+        result = z.object(shape);
+        break;
+      }
+      default:
+        result = z.any();
+        break;
+    }
+  }
+
+  if (schema.description && typeof result.describe === 'function') {
+    result = result.describe(String(schema.description));
+  }
+  return required ? result : result.optional();
+}
+
+export function jsonSchemaObjectToZodShape(schema) {
+  const properties = isObject(schema?.properties) ? schema.properties : {};
+  const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
+
+  return Object.fromEntries(
+    Object.entries(properties).map(([name, propertySchema]) => [
+      name,
+      jsonSchemaToZod(propertySchema, required.has(name)),
+    ]),
+  );
+}
+
+function buildExternalToolServer(openAiTools, collector) {
+  if (openAiTools.length === 0) return null;
+
+  const sdkTools = openAiTools.map((definition) => tool(
+    definition.name,
+    definition.description || `External client tool: ${definition.name}`,
+    jsonSchemaObjectToZodShape(definition.parameters),
+    async (args) => {
+      collector.add(definition.name, args || {});
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'The API gateway captured this external tool call. The client must execute the tool and return its result as a role=tool message.',
+          },
+        ],
+      };
+    },
+  ));
+
+  return createSdkMcpServer({
+    name: EXTERNAL_TOOL_SERVER_NAME,
+    version: '1.0.0',
+    tools: sdkTools,
+  });
+}
+
+export function createToolCallCollector() {
+  const calls = [];
+  const seen = new Set();
+
+  return {
+    add(name, args, id) {
+      const safeName = String(name || '');
+      const key = `${id || ''}:${safeName}:${JSON.stringify(args || {})}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      calls.push({
+        id: id || `call_${Date.now()}_${calls.length}`,
+        type: 'function',
+        function: {
+          name: safeName.includes('__') ? safeName.split('__').at(-1) : safeName,
+          arguments: JSON.stringify(args || {}),
+        },
+      });
+    },
+    list() {
+      return calls;
+    },
+    hasCalls() {
+      return calls.length > 0;
+    },
+  };
+}
+
+export function captureToolUseBlocks(msg, collector, externalToolNames) {
+  const content = msg?.message?.content;
+  if (!Array.isArray(content)) return;
+
+  for (const block of content) {
+    if (block?.type !== 'tool_use') continue;
+    const rawName = String(block.name || '');
+    const toolName = rawName.includes('__') ? rawName.split('__').at(-1) : rawName;
+    if (externalToolNames.has(rawName) || externalToolNames.has(toolName)) {
+      collector.add(toolName, block.input || {}, block.id);
+    }
+  }
+}
+
+export function streamingToolCalls(calls) {
+  return calls.map((call, index) => ({ index, ...call }));
+}
+
+export function resolveEffectiveModel(requestModel, configuredModel) {
+  return requestModel && requestModel !== 'codebuddy' ? requestModel : configuredModel;
+}
+
+function streamToolCallChunk(res, id, model, collector) {
+  const toolChunk = {
+    id: id || `chatcmpl-${Date.now()}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, delta: { tool_calls: streamingToolCalls(collector.list()) }, finish_reason: null }],
+  };
+  res.write(sseEvent(null, toolChunk));
 }
 
 // ---------------------------------------------------------------------------
@@ -142,21 +331,39 @@ async function handleChatCompletions(req, res) {
     return json(res, 400, { error: { message: '"messages" array is required' } });
   }
 
+  const externalTools = normalizeOpenAiTools(parsed.tools);
+  const externalToolNames = new Set(externalTools.map((item) => item.name));
+  const toolCallCollector = createToolCallCollector();
+  const externalToolServer = buildExternalToolServer(externalTools, toolCallCollector);
+  const abortController = new AbortController();
   const prompt = messagesToPrompt(messages);
 
   // Shared query options
   const queryOptions = {
-    allowedTools: ALLOWED_TOOLS,
+    abortController,
+    tools: BUILTIN_TOOLS,
     disallowedTools: DISALLOWED_TOOLS,
     maxTurns: MAX_TURNS,
     permissionMode: 'bypassPermissions',
     outputFormat: 'text',
+    includePartialMessages: externalTools.length > 0,
+    stderr: (data) => {
+      console.error(`[codebuddy stderr] ${data}`);
+    },
     // Load user-level settings so the SDK's spawned CLI can read the auth file
     // from ~/.local/share/CodeBuddyExtension/Data/Public/auth/
     settingSources: ['user'],
   };
+  if (SDK_ENV.CODEBUDDY_CODE_PATH) {
+    queryOptions.pathToCodebuddyCode = SDK_ENV.CODEBUDDY_CODE_PATH;
+  }
+  if (externalToolServer) {
+    queryOptions.mcpServers = {
+      [EXTERNAL_TOOL_SERVER_NAME]: externalToolServer,
+    };
+  }
   // Only pass model if explicitly specified; otherwise let CLI use its default.
-  const effectiveModel = model || MODEL;
+  const effectiveModel = resolveEffectiveModel(model, MODEL);
   if (effectiveModel) {
     queryOptions.model = effectiveModel;
   }
@@ -174,11 +381,20 @@ async function handleChatCompletions(req, res) {
     });
 
     let finishReason = 'stop';
+    let toolChunkSent = false;
     try {
       const q = query({ prompt, options: queryOptions });
 
       for await (const msg of q) {
         if (msg.type === 'assistant') {
+          captureToolUseBlocks(msg, toolCallCollector, externalToolNames);
+          if (toolCallCollector.hasCalls()) {
+            abortController.abort();
+            streamToolCallChunk(res, msg.uuid, model || 'codebuddy', toolCallCollector);
+            toolChunkSent = true;
+            finishReason = 'tool_calls';
+            break;
+          }
           const content = msg.message?.content;
           if (Array.isArray(content)) {
             for (const block of content) {
@@ -199,6 +415,16 @@ async function handleChatCompletions(req, res) {
             finishReason = 'error';
           }
         }
+
+        if (toolCallCollector.hasCalls()) {
+          abortController.abort();
+          if (!toolChunkSent) {
+            streamToolCallChunk(res, msg.uuid, model || 'codebuddy', toolCallCollector);
+            toolChunkSent = true;
+          }
+          finishReason = 'tool_calls';
+          break;
+        }
       }
 
       const finalChunk = {
@@ -210,7 +436,21 @@ async function handleChatCompletions(req, res) {
       };
       res.write(sseEvent(null, finalChunk));
     } catch (err) {
-      if (isAuthError(err)) {
+      if (toolCallCollector.hasCalls() && isAbortError(err)) {
+        finishReason = 'tool_calls';
+        if (!toolChunkSent) {
+          streamToolCallChunk(res, undefined, model || 'codebuddy', toolCallCollector);
+          toolChunkSent = true;
+        }
+        const finalChunk = {
+          id: `chatcmpl-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: model || 'codebuddy',
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+        };
+        res.write(sseEvent(null, finalChunk));
+      } else if (isAuthError(err)) {
         res.write(sseEvent('error', {
           message: 'Authentication required. Set CODEBUDDY_API_KEY or run "codebuddy login" via SSH.',
           detail: err.message,
@@ -230,6 +470,11 @@ async function handleChatCompletions(req, res) {
       let usage = { input_tokens: 0, output_tokens: 0 };
       for await (const msg of q) {
         if (msg.type === 'assistant') {
+          captureToolUseBlocks(msg, toolCallCollector, externalToolNames);
+          if (toolCallCollector.hasCalls()) {
+            abortController.abort();
+            break;
+          }
           const content = msg.message?.content;
           if (Array.isArray(content)) {
             for (const block of content) {
@@ -244,6 +489,36 @@ async function handleChatCompletions(req, res) {
         } else if (msg.type === 'result' && msg.subtype?.startsWith('error')) {
           return json(res, 500, { error: { message: msg.errors?.join('; ') || 'Execution error' } });
         }
+
+        if (toolCallCollector.hasCalls()) {
+          abortController.abort();
+          break;
+        }
+      }
+
+      if (toolCallCollector.hasCalls()) {
+        return json(res, 200, {
+          id: `chatcmpl-${Date.now()}`,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: model || 'codebuddy',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: toolCallCollector.list(),
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: {
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            total_tokens: usage.input_tokens + usage.output_tokens,
+          },
+        });
       }
 
       json(res, 200, {
@@ -265,6 +540,30 @@ async function handleChatCompletions(req, res) {
         },
       });
     } catch (err) {
+      if (toolCallCollector.hasCalls() && isAbortError(err)) {
+        return json(res, 200, {
+          id: `chatcmpl-${Date.now()}`,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: model || 'codebuddy',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: toolCallCollector.list(),
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+          },
+        });
+      }
       if (isAuthError(err)) {
         json(res, 401, {
           error: {
@@ -291,7 +590,7 @@ const ROUTES = {
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   const key = `${req.method} ${req.url}`;
 
   // CORS
@@ -321,9 +620,11 @@ const server = http.createServer(async (req, res) => {
 
 server.timeout = REQUEST_TIMEOUT_MS;
 
-server.listen(PORT, HOST, () => {
-  console.log(`codebuddy-gateway ready at http://${HOST}:${PORT}`);
-  console.log(`  → POST /v1/chat/completions`);
-  console.log(`  → GET  /v1/models`);
-  console.log(`  → GET  /health`);
-});
+if (IS_MAIN) {
+  server.listen(PORT, HOST, () => {
+    console.log(`codebuddy-gateway ready at http://${HOST}:${PORT}`);
+    console.log(`  → POST /v1/chat/completions`);
+    console.log(`  → GET  /v1/models`);
+    console.log(`  → GET  /health`);
+  });
+}
