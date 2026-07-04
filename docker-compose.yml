@@ -14,7 +14,7 @@ services:
       CODEBUDDY_GATEWAY_ENABLED: "true"
       # CODEBUDDY_GATEWAY_HOST: "0.0.0.0"
       # CODEBUDDY_GATEWAY_PORT: "10532"
-      CODEBUDDY_GATEWAY_TOOLS: ""  # built-in tools disabled; API callers provide external OpenAI-style tools
+      # CODEBUDDY_GATEWAY_TOOLS: ""  # built-in tools disabled; API callers provide external OpenAI-style tools
       # CODEBUDDY_GATEWAY_DISALLOWED_TOOLS: "Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)"
       # CODEBUDDY_GATEWAY_MODEL: ""
       # CODEBUDDY_GATEWAY_MAX_TURNS: "30"
