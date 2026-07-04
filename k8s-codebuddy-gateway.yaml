@@ -54,6 +54,19 @@ spec:
             #       key: CODEBUDDY_API_KEY
             - name: CODEBUDDY_GATEWAY_ENABLED
               value: "true"
+            # Built-in CodeBuddy tools are disabled by default for REST API calls.
+            # API callers can still pass OpenAI-style `tools`; those are returned
+            # as tool_calls for the caller to execute externally.
+            - name: CODEBUDDY_GATEWAY_TOOLS
+              value: ""
+            - name: CODEBUDDY_GATEWAY_DISALLOWED_TOOLS
+              value: "Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)"
+            # - name: CODEBUDDY_GATEWAY_MODEL
+            #   value: "glm-5.2"
+            # - name: CODEBUDDY_GATEWAY_MAX_TURNS
+            #   value: "30"
+            # - name: CODEBUDDY_GATEWAY_TIMEOUT
+            #   value: "300000"
           volumeMounts:
             - name: codebuddy-home
               mountPath: /home/codebuddy
