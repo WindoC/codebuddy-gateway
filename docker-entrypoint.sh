@@ -41,9 +41,9 @@ start_gateway() {
   if [[ -n "${CODEBUDDY_API_KEY:-}" ]]; then
     pass_env+=("CODEBUDDY_API_KEY=${CODEBUDDY_API_KEY}")
   fi
-  # Point SDK to the system-installed CLI so it can read local auth files.
-  # Without this the SDK spawns its bundled CLI which targets a different API.
-  pass_env+=("CODEBUDDY_CODE_PATH=/usr/local/bin/codebuddy")
+  # Point SDK to the system-installed CLI package path so it can resolve
+  # dist/codebuddy-headless.js relative to the real npm package directory.
+  pass_env+=("CODEBUDDY_CODE_PATH=/usr/local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy")
 
   while true; do
     cd "${GATEWAY_DIR}"
@@ -52,7 +52,7 @@ start_gateway() {
         "${pass_env[@]}" \
         CODEBUDDY_GATEWAY_HOST="${GATEWAY_HOST}" \
         CODEBUDDY_GATEWAY_PORT="${GATEWAY_PORT}" \
-        CODEBUDDY_GATEWAY_TOOLS="${CODEBUDDY_GATEWAY_TOOLS:-Read,Grep,WebSearch,Bash}" \
+        CODEBUDDY_GATEWAY_TOOLS="${CODEBUDDY_GATEWAY_TOOLS:-}" \
         CODEBUDDY_GATEWAY_DISALLOWED_TOOLS="${CODEBUDDY_GATEWAY_DISALLOWED_TOOLS:-Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)}" \
         CODEBUDDY_GATEWAY_MODEL="${CODEBUDDY_GATEWAY_MODEL:-}" \
         CODEBUDDY_GATEWAY_MAX_TURNS="${CODEBUDDY_GATEWAY_MAX_TURNS:-30}" \
@@ -80,7 +80,7 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 EOF
 fi
 
-# CodeBuddy 可能需要的一些环境变量（按需扩展）
+# Optional environment variables used by CodeBuddy.
 if [[ -n "${CODEBUDDY_API_KEY:-}" ]]; then
   sed -i '/^export CODEBUDDY_API_KEY=/d' "${ENV_FILE}"
   printf 'export CODEBUDDY_API_KEY=%q\n' "${CODEBUDDY_API_KEY}" >> "${ENV_FILE}"

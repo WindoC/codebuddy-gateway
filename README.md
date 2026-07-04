@@ -13,7 +13,7 @@ The image creates a default `codebuddy` user at build time and uses `/home/codeb
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                   codebuddy-gateway 容器                 │
+│                   codebuddy-gateway container            │
 │                                                          │
 │  ┌─────────────┐    ┌──────────────────────────────────┐ │
 │  │  SSH Daemon  │    │  codebuddy-gateway (REST API)   │ │
@@ -35,7 +35,8 @@ The image creates a default `codebuddy` user at build time and uses `/home/codeb
 │                  │                                        │
 │          ┌───────▼────────┐                              │
 │          │  .codebuddy/    │                              │
-│          │  (凭证/会话)     │                              │
+│          │  (credentials/    │                              │
+│          │   sessions)       │                              │
 │          └────────────────┘                              │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -73,7 +74,7 @@ docker run -d --name codebuddy-gateway \
 | `CODEBUDDY_GATEWAY_ENABLED` | `true` | Enable the OpenAI-compatible REST API |
 | `CODEBUDDY_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `CODEBUDDY_GATEWAY_PORT` | `10532` | Gateway listen port |
-| `CODEBUDDY_GATEWAY_TOOLS` | `Read,Grep,WebSearch,Bash` | Allowed tools (comma-separated) |
+| `CODEBUDDY_GATEWAY_TOOLS` | — | Built-in CodeBuddy tools to expose (comma-separated). Empty by default so API callers can use their own OpenAI-style tools |
 | `CODEBUDDY_GATEWAY_DISALLOWED_TOOLS` | `Bash(git commit),Bash(git push),Bash(rm),Bash(sudo)` | Disallowed tools |
 | `CODEBUDDY_GATEWAY_MODEL` | — | Model override |
 | `CODEBUDDY_GATEWAY_MAX_TURNS` | `30` | Max conversation turns |
@@ -115,14 +116,14 @@ The `codebuddy-stdin` wrapper script:
 ### JSON output (for scripting)
 
 ```bash
-echo "列出项目中的主要函数" | \
+echo "List the main functions in this project" | \
   ssh -p 2222 codebuddy@127.0.0.1 'codebuddy-stdin --output-format json'
 ```
 
 ### Stream JSON input (multi-turn)
 
 ```bash
-echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"解释这段代码"}]}}' | \
+echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Explain this code"}]}}' | \
   ssh -p 2222 codebuddy@127.0.0.1 \
   'codebuddy -p --input-format stream-json --output-format stream-json -y'
 ```
@@ -141,7 +142,7 @@ curl -s http://127.0.0.1:10532/v1/chat/completions \
   -d '{
     "model": "codebuddy",
     "messages": [
-      {"role": "user", "content": "用中文解释什么是 Docker"}
+      {"role": "user", "content": "Explain what Docker is in one paragraph"}
     ]
   }'
 ```
@@ -158,6 +159,75 @@ curl -s http://127.0.0.1:10532/v1/chat/completions \
       {"role": "user", "content": "Write a Python function to reverse a linked list"}
     ]
   }'
+```
+
+### Custom tools / function calling
+
+The REST API accepts OpenAI-style `tools` and exposes them to CodeBuddy as request-scoped SDK MCP tools. When the model chooses a tool, the gateway returns an OpenAI-compatible `tool_calls` response. The external client is responsible for executing the tool and sending the result back as a `role: "tool"` message.
+
+```bash
+curl -s http://127.0.0.1:10532/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codebuddy",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Calculator",
+          "description": "Evaluate a math expression",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "input": { "type": "string", "description": "Math expression to evaluate" }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "messages": [
+      { "role": "user", "content": "What is 12 * 37?" }
+    ]
+  }'
+```
+
+Example tool-call response:
+
+```json
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_...",
+            "type": "function",
+            "function": {
+              "name": "Calculator",
+              "arguments": "{\"input\":\"12 * 37\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
+```
+
+Then call the API again with the original assistant `tool_calls` message and the external tool result:
+
+```json
+{
+  "role": "tool",
+  "tool_call_id": "call_...",
+  "name": "Calculator",
+  "content": "444"
+}
 ```
 
 ### List Models
@@ -252,15 +322,12 @@ The `codebuddy-gateway` (at `/opt/codebuddy-gateway/server.mjs`) is a lightweigh
 2. Converts them to prompts for the **CodeBuddy Agent SDK** (`@tencent-ai/agent-sdk`)
 3. Streams or collects the response back in OpenAI format
 4. Supports both streaming and non-streaming modes
+5. Converts request-scoped OpenAI `tools` into SDK MCP tools and returns `tool_calls` for the client to execute
 
-The gateway uses the **Agent SDK** as the bridge layer — the SDK manages the CLI process, authentication, tool execution, and message streaming internally.
+The gateway uses the **Agent SDK** as the bridge layer. The SDK manages the CLI process, authentication, built-in tool plumbing, request-scoped MCP tools, and message streaming. OpenAI-style custom tools passed to the REST API are external client tools: the gateway exposes their schemas to the model and returns `tool_calls`, but it does not execute those tools.
 
 ### Safety
 
-The gateway runs with restricted tools by default:
-- Allowed: `Read`, `Grep`, `WebSearch`, `Bash`
-- Disallowed: `Bash(git commit)`, `Bash(git push)`, `Bash(rm)`, `Bash(sudo)`
+The gateway disables built-in CodeBuddy tools by default for REST API calls. API callers can still pass OpenAI-style `tools`; those tools are treated as external client tools and are not executed by the gateway.
 
-Adjust `CODEBUDDY_GATEWAY_TOOLS` / `CODEBUDDY_GATEWAY_DISALLOWED_TOOLS` to fit your security requirements.
-
-
+Set `CODEBUDDY_GATEWAY_TOOLS` only if you intentionally want to expose built-in CodeBuddy tools such as `Read`, `Grep`, `WebSearch`, or `Bash`. `CODEBUDDY_GATEWAY_DISALLOWED_TOOLS` remains available as an extra deny list.
