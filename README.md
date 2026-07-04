@@ -9,6 +9,14 @@ It allows another user/container to SSH in and run CodeBuddy from stdin/stdout, 
 
 The image creates a default `codebuddy` user at build time and uses `/home/codebuddy` as a persistent volume.
 
+## Why this exists
+
+This project is a small gateway for using [CodeBuddy Code](https://www.codebuddy.cn/docs/cli/overview) from agent systems, workflow automation, and tools such as n8n. The idea is similar in spirit to [EvanZhouDev/openai-oauth](https://github.com/EvanZhouDev/openai-oauth): expose a local/contained coding assistant through an API shape that existing OpenAI-compatible clients already understand.
+
+CodeBuddy Code is Tencent Cloud's AI coding assistant. Its CLI is terminal-native, supports interactive use, direct prompts, stdin/stdout workflows, built-in development tools, and MCP-based extension. The [CodeBuddy Agent SDK](https://www.codebuddy.cn/docs/cli/sdk) provides programmatic control from TypeScript/JavaScript and Python, with support for streaming messages, sessions, permission control, hooks, custom agents, and MCP integration. This gateway uses the TypeScript SDK package (`@tencent-ai/agent-sdk`) to bridge OpenAI-style chat requests into CodeBuddy SDK calls.
+
+The main goal is convenience: keep CodeBuddy authentication and runtime state inside a persistent container volume, then let external agents call a familiar `/v1/chat/completions` endpoint or connect over SSH.
+
 ## Architecture
 
 ```
@@ -47,10 +55,10 @@ The image creates a default `codebuddy` user at build time and uses `/home/codeb
 docker build -t codebuddy-gateway:latest .
 ```
 
-GitLab CI/CD publishes image to:
+GitHub Actions publishes tagged images to:
 
 ```text
-registry.windo.me/tools/codebuddy-gateway
+ghcr.io/windoc/codebuddy-gateway
 ```
 
 ## Run
@@ -61,7 +69,7 @@ docker run -d --name codebuddy-gateway \
   -p 10532:10532 \
   -e SSH_PASSWORD=codebuddy \
   -v codebuddy-home:/home/codebuddy \
-  registry.windo.me/tools/codebuddy-gateway:latest
+  ghcr.io/windoc/codebuddy-gateway:latest
 ```
 
 ### Environment variables
@@ -82,6 +90,33 @@ docker run -d --name codebuddy-gateway \
 
 These env vars are auto-loaded on SSH login via `.bashrc`, `.profile`, and `.bash_profile`.
 If the home volume already has files, startup keeps existing files and only creates missing ones.
+
+---
+
+## Authenticate CodeBuddy inside Docker
+
+The REST API uses the CodeBuddy CLI through the Agent SDK, so the container must be authenticated before `/v1/chat/completions` can work. Keep `/home/codebuddy` on a Docker volume so the CodeBuddy credentials and sessions survive container restarts.
+
+After starting the container, run the CodeBuddy login flow inside it:
+
+```bash
+docker exec -it --user codebuddy codebuddy-gateway codebuddy login
+```
+
+Follow the login instructions printed by the CLI. After login, verify that the CLI works from the same container user:
+
+```bash
+docker exec -it --user codebuddy codebuddy-gateway \
+  codebuddy -p "Reply with OK if authentication works." -y
+```
+
+If you use Docker Compose, the service name can be used instead of the container name:
+
+```bash
+docker compose exec --user codebuddy codebuddy-gateway codebuddy login
+```
+
+You can also pass `CODEBUDDY_API_KEY` when starting the container, but interactive `codebuddy login` is usually easier for local use. Without a valid CodeBuddy login or API key, the REST API will return an authentication error.
 
 ---
 
@@ -132,7 +167,7 @@ echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"
 
 ## Usage — REST API (OpenAI-compatible)
 
-The gateway exposes an OpenAI-compatible HTTP API on port `10532`.
+The gateway exposes an OpenAI-compatible HTTP API on port `10532`. CodeBuddy must be authenticated inside the container first; see [Authenticate CodeBuddy inside Docker](#authenticate-codebuddy-inside-docker).
 
 ### Chat Completions (non-streaming)
 
@@ -288,7 +323,7 @@ docker run -d --name codebuddy-gateway \
   -p 10532:10532 \
   -e SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)" \
   -v codebuddy-home:/home/codebuddy \
-  registry.windo.me/tools/codebuddy-gateway:latest
+  ghcr.io/windoc/codebuddy-gateway:latest
 ```
 
 ## Docker Compose

@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: codebuddy-gateway
-          image: registry.windo.me/tools/codebuddy-gateway:latest
+          image: ghcr.io/windoc/codebuddy-gateway:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 22
