@@ -7,6 +7,7 @@ import {
   attachRequestAbort,
   captureToolUseBlocks,
   createToolCallCollector,
+  isSensitiveContentRefusal,
   jsonSchemaObjectToZodShape,
   messagesToPrompt,
   normalizeOpenAiTools,
@@ -175,6 +176,13 @@ test('resolveEffectiveModel treats codebuddy as gateway default alias', () => {
   assert.equal(resolveEffectiveModel(undefined, 'glm-5.2'), 'glm-5.2');
 });
 
+test('isSensitiveContentRefusal detects CodeBuddy policy refusal text', () => {
+  assert.equal(isSensitiveContentRefusal(
+    '抱歉，系统检测到您当前输入的信息存在敏感内容，我无法响应您的请求，请检查后重新输入。This topic is currently outside the scope of my capabilities, so I\'m unable to discuss it further.',
+  ), true);
+  assert.equal(isSensitiveContentRefusal('This is a normal assistant response.'), false);
+  assert.equal(isSensitiveContentRefusal('系统检测到您当前输入的信息存在敏感内容'), false);
+});
 
 test('readBody rejects oversized request bodies', async () => {
   const req = new PassThrough();
