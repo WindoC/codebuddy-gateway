@@ -94,6 +94,27 @@ function sseEvent(event, data) {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
+const SENSITIVE_CONTENT_REFUSAL_PATTERNS = [
+  /系统检测到您当前输入的信息存在敏感内容/,
+  /This topic is currently outside the scope of my capabilities/i,
+];
+
+export function isSensitiveContentRefusal(text) {
+  if (typeof text !== 'string') return false;
+  return SENSITIVE_CONTENT_REFUSAL_PATTERNS.every((pattern) => pattern.test(text));
+}
+
+function sensitiveContentRefusalError(detail) {
+  return {
+    error: {
+      message: 'CodeBuddy refused the request because the input was classified as sensitive content.',
+      type: 'invalid_request_error',
+      code: 'sensitive_content_refusal',
+      detail,
+    },
+  };
+}
+
 /**
  * Detect whether an error is auth-related (401, login required, etc.)
  * and return a user-friendly message.
@@ -521,6 +542,11 @@ async function handleChatCompletions(req, res) {
         });
       }
 
+      const responseText = parts.join('');
+      if (isSensitiveContentRefusal(responseText)) {
+        return json(res, 400, sensitiveContentRefusalError(responseText));
+      }
+
       json(res, 200, {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -529,7 +555,7 @@ async function handleChatCompletions(req, res) {
         choices: [
           {
             index: 0,
-            message: { role: 'assistant', content: parts.join('') },
+            message: { role: 'assistant', content: responseText },
             finish_reason: 'stop',
           },
         ],
