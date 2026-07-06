@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { z } from 'zod';
 import {
+  attachRequestAbort,
   captureToolUseBlocks,
   createToolCallCollector,
   isSensitiveContentRefusal,
@@ -9,6 +12,8 @@ import {
   messagesToPrompt,
   normalizeOpenAiTools,
   parseCsv,
+  readBody,
+  RequestBodyTooLargeError,
   resolveEffectiveModel,
   streamingToolCalls,
 } from '../server.mjs';
@@ -177,4 +182,32 @@ test('isSensitiveContentRefusal detects CodeBuddy policy refusal text', () => {
   ), true);
   assert.equal(isSensitiveContentRefusal('This is a normal assistant response.'), false);
   assert.equal(isSensitiveContentRefusal('系统检测到您当前输入的信息存在敏感内容'), false);
+});
+
+test('readBody rejects oversized request bodies', async () => {
+  const req = new PassThrough();
+  const bodyPromise = readBody(req, 4);
+
+  req.write(Buffer.from('123'));
+  req.write(Buffer.from('45'));
+
+  await assert.rejects(bodyPromise, RequestBodyTooLargeError);
+  assert.equal(req.destroyed, true);
+});
+
+test('attachRequestAbort aborts on client disconnect and detaches listeners', () => {
+  const req = new EventEmitter();
+  const res = new EventEmitter();
+  res.writableEnded = false;
+  const abortController = new AbortController();
+
+  const detach = attachRequestAbort(req, res, abortController, 0);
+
+  res.emit('close');
+  assert.equal(abortController.signal.aborted, true);
+  assert.match(abortController.signal.reason.message, /response closed/);
+
+  detach();
+  assert.equal(req.listenerCount('aborted'), 0);
+  assert.equal(res.listenerCount('close'), 0);
 });

@@ -35,6 +35,7 @@ node --check gateway/server.mjs
 - Do not point SDK startup at `/usr/local/bin/codebuddy`; the SDK resolves `dist/codebuddy-headless.js` relative to the provided path and the symlink path resolves incorrectly.
 - Treat request model `codebuddy` as a gateway alias. Do not pass it through to the CodeBuddy CLI as a model id.
 - REST API built-in CodeBuddy tools are disabled by default. External OpenAI-style `tools` are exposed as request-scoped SDK MCP tools and returned to clients as OpenAI-compatible `tool_calls`.
+- `/v1/models` uses bounded SDK model discovery and falls back to the gateway default model list after `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`.
 
 ## Docker Verification
 
@@ -62,7 +63,7 @@ Verify:
 curl -s http://127.0.0.1:11532/health
 ```
 
-Then test `/v1/chat/completions` with `model: "codebuddy"` and a simple exact-response prompt. For custom tools, verify the first response returns `finish_reason: "tool_calls"` and an OpenAI-compatible `message.tool_calls` array, then send the external tool result back as a `role: "tool"` message.
+Then test `/v1/models`, `/v1/chat/completions` with `model: "codebuddy"` and a simple exact-response prompt, and a streaming chat response. For custom tools, verify the first response returns `finish_reason: "tool_calls"` and an OpenAI-compatible `message.tool_calls` array, then send the external tool result back as a `role: "tool"` message.
 
 Clean up only the disposable container, not the auth volume:
 

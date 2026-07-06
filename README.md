@@ -87,6 +87,8 @@ docker run -d --name codebuddy-gateway \
 | `CODEBUDDY_GATEWAY_MODEL` | — | Model override |
 | `CODEBUDDY_GATEWAY_MAX_TURNS` | `30` | Max conversation turns |
 | `CODEBUDDY_GATEWAY_TIMEOUT` | `300000` | Request timeout in ms |
+| `CODEBUDDY_GATEWAY_MODELS_TIMEOUT` | `5000` | `/v1/models` SDK discovery timeout in ms before returning fallback models |
+| `CODEBUDDY_GATEWAY_MAX_BODY_BYTES` | `10485760` | Maximum JSON request body size in bytes |
 
 These env vars are auto-loaded on SSH login via `.bashrc`, `.profile`, and `.bash_profile`.
 If the home volume already has files, startup keeps existing files and only creates missing ones.
@@ -270,6 +272,8 @@ Then call the API again with the original assistant `tool_calls` message and the
 ```bash
 curl -s http://127.0.0.1:10532/v1/models
 ```
+
+The endpoint first asks the SDK for model metadata. If discovery does not respond within `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`, it returns the gateway fallback model list instead of leaving the HTTP request hanging.
 
 ### Health Check
 
