@@ -44,7 +44,8 @@ COPY sshd_config /etc/ssh/sshd_config
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY codebuddy-stdin.sh /usr/local/bin/codebuddy-stdin
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/codebuddy-stdin
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/bin/codebuddy-stdin \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/codebuddy-stdin
 
 WORKDIR /home/codebuddy/workspace
 

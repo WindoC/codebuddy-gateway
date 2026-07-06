@@ -16,6 +16,8 @@ const DISALLOWED_TOOLS = parseCsv(process.env.CODEBUDDY_GATEWAY_DISALLOWED_TOOLS
 const MODEL = process.env.CODEBUDDY_GATEWAY_MODEL || undefined;
 const MAX_TURNS = parseInt(process.env.CODEBUDDY_GATEWAY_MAX_TURNS || '30', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_GATEWAY_TIMEOUT || '300000', 10);
+const MODELS_REFRESH_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_GATEWAY_MODELS_TIMEOUT || '5000', 10);
+const MAX_REQUEST_BODY_BYTES = parseInt(process.env.CODEBUDDY_GATEWAY_MAX_BODY_BYTES || String(10 * 1024 * 1024), 10);
 const EXTERNAL_TOOL_SERVER_NAME = 'openai_client_tools';
 
 // Build the env object to pass through to the SDK.
@@ -54,14 +56,59 @@ export function parseCsv(value) {
 }
 
 function json(res, status, body) {
+  if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
 }
 
-function readBody(req) {
+export class RequestBodyTooLargeError extends Error {
+  constructor(limit) {
+    super(`Request body exceeds ${limit} bytes`);
+    this.name = 'RequestBodyTooLargeError';
+    this.statusCode = 413;
+  }
+}
+
+function abortWith(controller, reason) {
+  if (!controller.signal.aborted) {
+    controller.abort(reason);
+  }
+}
+
+export function attachRequestAbort(req, res, abortController, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const onAborted = () => abortWith(abortController, new Error('HTTP request aborted by client'));
+  const onResponseClosed = () => {
+    if (!res.writableEnded) {
+      abortWith(abortController, new Error('HTTP response closed before completion'));
+    }
+  };
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => abortWith(abortController, new Error('Gateway request timed out')), timeoutMs)
+    : null;
+
+  req.once('aborted', onAborted);
+  res.once('close', onResponseClosed);
+
+  return () => {
+    req.off('aborted', onAborted);
+    res.off('close', onResponseClosed);
+    if (timeout) clearTimeout(timeout);
+  };
+}
+
+export function readBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let received = 0;
+    req.on('data', (c) => {
+      received += c.length;
+      if (received > maxBytes) {
+        reject(new RequestBodyTooLargeError(maxBytes));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     req.on('error', reject);
   });
@@ -256,6 +303,7 @@ export function resolveEffectiveModel(requestModel, configuredModel) {
 }
 
 function streamToolCallChunk(res, id, model, collector) {
+  if (res.destroyed || res.writableEnded) return;
   const toolChunk = {
     id: id || `chatcmpl-${Date.now()}`,
     object: 'chat.completion.chunk',
@@ -276,32 +324,54 @@ function streamToolCallChunk(res, id, model, collector) {
 let cachedModels = null;
 
 async function refreshModels() {
-  try {
-    const q = query({
-      prompt: '',
-      options: {
-        maxTurns: 0,
-        permissionMode: 'bypassPermissions',
-        outputFormat: 'text',
-        settingSources: ['user'],
-        env: SDK_ENV,
-      },
-    });
-    // We just need the init message which includes model info.
-    for await (const msg of q) {
-      if (msg.type === 'init') {
-        const models = msg.models || [];
-        if (models.length > 0) {
-          return models.map((m) => ({ id: m, object: 'model', owned_by: 'codebuddy' }));
+  const abortController = new AbortController();
+  let timeout = null;
+
+  const discoverModels = async () => {
+    try {
+      const q = query({
+        prompt: '',
+        options: {
+          abortController,
+          maxTurns: 0,
+          permissionMode: 'bypassPermissions',
+          outputFormat: 'text',
+          settingSources: ['user'],
+          env: SDK_ENV,
+        },
+      });
+      // We just need the init message which includes model info.
+      for await (const msg of q) {
+        if (msg.type === 'init') {
+          const models = msg.models || [];
+          if (models.length > 0) {
+            return models.map((m) => ({ id: m, object: 'model', owned_by: 'codebuddy' }));
+          }
         }
       }
+    } catch {
+      // fall through to defaults
     }
-  } catch {
-    // fall through to defaults
-  }
-  return null;
-}
+    return null;
+  };
 
+  const discovery = discoverModels();
+  const timeoutMs = Number.isFinite(MODELS_REFRESH_TIMEOUT_MS) ? MODELS_REFRESH_TIMEOUT_MS : 0;
+  if (timeoutMs <= 0) return discovery;
+
+  const fallbackOnTimeout = new Promise((resolve) => {
+    timeout = setTimeout(() => {
+      abortWith(abortController, new Error('Model discovery timed out'));
+      resolve(null);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([discovery, fallbackOnTimeout]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 async function handleModels(_req, res) {
   if (!cachedModels) {
     cachedModels = await refreshModels();
@@ -318,7 +388,15 @@ async function handleModels(_req, res) {
 
 // POST /v1/chat/completions
 async function handleChatCompletions(req, res) {
-  const body = await readBody(req);
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    if (err instanceof RequestBodyTooLargeError) {
+      return json(res, 413, { error: { message: err.message } });
+    }
+    throw err;
+  }
   let parsed;
   try {
     parsed = JSON.parse(body);
@@ -336,6 +414,7 @@ async function handleChatCompletions(req, res) {
   const toolCallCollector = createToolCallCollector();
   const externalToolServer = buildExternalToolServer(externalTools, toolCallCollector);
   const abortController = new AbortController();
+  const detachRequestAbort = attachRequestAbort(req, res, abortController);
   const prompt = messagesToPrompt(messages);
 
   // Shared query options
@@ -406,7 +485,9 @@ async function handleChatCompletions(req, res) {
                   model: model || 'codebuddy',
                   choices: [{ index: 0, delta: { content: block.text }, finish_reason: null }],
                 };
-                res.write(sseEvent(null, chunk));
+                if (!res.destroyed && !res.writableEnded) {
+                  res.write(sseEvent(null, chunk));
+                }
               }
             }
           }
@@ -434,7 +515,9 @@ async function handleChatCompletions(req, res) {
         model: model || 'codebuddy',
         choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
       };
-      res.write(sseEvent(null, finalChunk));
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(sseEvent(null, finalChunk));
+      }
     } catch (err) {
       if (toolCallCollector.hasCalls() && isAbortError(err)) {
         finishReason = 'tool_calls';
@@ -449,18 +532,28 @@ async function handleChatCompletions(req, res) {
           model: model || 'codebuddy',
           choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
         };
-        res.write(sseEvent(null, finalChunk));
+        if (!res.destroyed && !res.writableEnded) {
+          res.write(sseEvent(null, finalChunk));
+        }
       } else if (isAuthError(err)) {
-        res.write(sseEvent('error', {
-          message: 'Authentication required. Set CODEBUDDY_API_KEY or run "codebuddy login" via SSH.',
-          detail: err.message,
-        }));
+        if (!res.destroyed && !res.writableEnded) {
+          res.write(sseEvent('error', {
+            message: 'Authentication required. Set CODEBUDDY_API_KEY or run "codebuddy login" via SSH.',
+            detail: err.message,
+          }));
+        }
       } else {
-        res.write(sseEvent('error', { message: err.message }));
+        if (!isAbortError(err) && !res.destroyed && !res.writableEnded) {
+          res.write(sseEvent('error', { message: err.message }));
+        }
       }
+    } finally {
+      detachRequestAbort();
     }
-    res.write(sseEvent(null, '[DONE]'));
-    res.end();
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(sseEvent(null, '[DONE]'));
+      res.end();
+    }
   } else {
     // ---- Non-streaming ----
     try {
@@ -574,6 +667,8 @@ async function handleChatCompletions(req, res) {
       } else {
         json(res, 500, { error: { message: err.message } });
       }
+    } finally {
+      detachRequestAbort();
     }
   }
 }
