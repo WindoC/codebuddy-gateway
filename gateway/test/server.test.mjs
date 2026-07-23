@@ -7,7 +7,6 @@ import {
   attachRequestAbort,
   captureToolUseBlocks,
   createToolCallCollector,
-  errorMessage,
   isSensitiveContentRefusal,
   jsonSchemaObjectToZodShape,
   messagesToPrompt,
@@ -20,14 +19,6 @@ import {
   sseEvent,
   streamingToolCalls,
 } from '../server.mjs';
-
-test('errorMessage preserves SDK string throws and supplies a safe fallback', () => {
-  assert.equal(errorMessage(new Error('object failure')), 'object failure');
-  assert.equal(errorMessage('string failure'), 'string failure');
-  assert.equal(errorMessage({ message: 'plain object failure' }), 'plain object failure');
-  assert.equal(errorMessage({ reason: 'structured failure' }), '{"reason":"structured failure"}');
-  assert.equal(errorMessage(undefined), 'Unknown error');
-});
 
 test('SSE uses JSON for chunks and a raw OpenAI done sentinel', () => {
   assert.equal(sseEvent(null, { choices: [] }), 'data: {"choices":[]}\n\n');

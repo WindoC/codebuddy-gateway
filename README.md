@@ -300,12 +300,7 @@ print(response.choices[0].message.content)
 
 ### LiteLLM compatibility
 
-Configure LiteLLM's OpenAI-compatible upstream `api_base` to end in `/v1`. The
-gateway always serializes SDK failures as JSON with a non-empty
-`error.message`, including the plain-string errors that some CodeBuddy CLI
-versions throw. This lets LiteLLM identify an upstream API error instead of
-trying to read `choices` from a string.
-
+Configure LiteLLM's OpenAI-compatible upstream `api_base` to end in `/v1`.
 For streaming requests, the gateway emits JSON chat-completion chunks followed
 by the unquoted OpenAI SSE terminator `data: [DONE]`.
 

@@ -57,21 +57,8 @@ export function parseCsv(value) {
 
 function json(res, status, body) {
   if (res.destroyed || res.writableEnded) return;
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
-}
-
-export function errorMessage(error, fallback = 'Unknown error') {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'string' && error) return error;
-  if (error && typeof error.message === 'string' && error.message) return error.message;
-
-  try {
-    const serialized = JSON.stringify(error);
-    return serialized && serialized !== '{}' ? serialized : fallback;
-  } catch {
-    return String(error) || fallback;
-  }
 }
 
 export class RequestBodyTooLargeError extends Error {
@@ -431,7 +418,7 @@ async function handleChatCompletions(req, res) {
     body = await readBody(req);
   } catch (err) {
     if (err instanceof RequestBodyTooLargeError) {
-      return json(res, 413, { error: { message: errorMessage(err) } });
+      return json(res, 413, { error: { message: err.message } });
     }
     throw err;
   }
@@ -577,12 +564,12 @@ async function handleChatCompletions(req, res) {
         if (!res.destroyed && !res.writableEnded) {
           res.write(sseEvent('error', {
             message: 'Authentication required. Set CODEBUDDY_API_KEY or run "codebuddy login" via SSH.',
-            detail: errorMessage(err),
+            detail: err.message,
           }));
         }
       } else {
         if (!isAbortError(err) && !res.destroyed && !res.writableEnded) {
-          res.write(sseEvent('error', { message: errorMessage(err) }));
+          res.write(sseEvent('error', { message: err.message }));
         }
       }
     } finally {
@@ -704,11 +691,11 @@ async function handleChatCompletions(req, res) {
         json(res, 401, {
           error: {
             message: 'Authentication required. Set CODEBUDDY_API_KEY or run "codebuddy login" via SSH.',
-            detail: errorMessage(err),
+            detail: err.message,
           },
         });
       } else {
-        json(res, 500, { error: { message: errorMessage(err) } });
+        json(res, 500, { error: { message: err.message } });
       }
     } finally {
       detachRequestAbort();
@@ -748,7 +735,7 @@ export const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error(`[${key}] error:`, err);
       if (!res.headersSent) {
-        json(res, 500, { error: { message: errorMessage(err) } });
+        json(res, 500, { error: { message: err.message } });
       }
     }
   } else {
