@@ -298,6 +298,14 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### LiteLLM compatibility
+
+Configure LiteLLM's OpenAI-compatible upstream `api_base` to end in `/v1`. The
+gateway always serializes SDK failures as JSON with a non-empty
+`error.message`, including the plain-string errors that some CodeBuddy CLI
+versions throw. This lets LiteLLM identify an upstream API error instead of
+trying to read `choices` from a string.
+
 ### Using with Vercel AI SDK
 
 ```typescript
