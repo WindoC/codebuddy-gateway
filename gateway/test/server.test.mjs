@@ -15,9 +15,16 @@ import {
   readBody,
   RequestBodyTooLargeError,
   resolveEffectiveModel,
+  sseDone,
+  sseEvent,
   streamingToolCalls,
 } from '../server.mjs';
 
+test('SSE uses JSON for chunks and a raw OpenAI done sentinel', () => {
+  assert.equal(sseEvent(null, { choices: [] }), 'data: {"choices":[]}\n\n');
+  assert.equal(sseDone(), 'data: [DONE]\n\n');
+  assert.notEqual(sseDone(), sseEvent(null, '[DONE]'));
+});
 test('parseCsv trims values and drops blanks', () => {
   assert.deepEqual(parseCsv(' Read, ,Grep, Bash(git push) '), [
     'Read',

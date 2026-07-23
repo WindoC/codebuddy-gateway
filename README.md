@@ -298,6 +298,12 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### LiteLLM compatibility
+
+Configure LiteLLM's OpenAI-compatible upstream `api_base` to end in `/v1`.
+For streaming requests, the gateway emits JSON chat-completion chunks followed
+by the unquoted OpenAI SSE terminator `data: [DONE]`.
+
 ### Using with Vercel AI SDK
 
 ```typescript

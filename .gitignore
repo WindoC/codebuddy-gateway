@@ -10,3 +10,7 @@ pnpm-debug.log*
 
 *.local
 *.log
+
+# some local ignore for local debuging
+.issues/
+.temp/
