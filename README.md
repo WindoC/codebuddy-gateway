@@ -306,6 +306,9 @@ gateway always serializes SDK failures as JSON with a non-empty
 versions throw. This lets LiteLLM identify an upstream API error instead of
 trying to read `choices` from a string.
 
+For streaming requests, the gateway emits JSON chat-completion chunks followed
+by the unquoted OpenAI SSE terminator `data: [DONE]`.
+
 ### Using with Vercel AI SDK
 
 ```typescript

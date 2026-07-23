@@ -149,9 +149,13 @@ export function messagesToPrompt(messages) {
 }
 
 /** Build a simple SSE frame */
-function sseEvent(event, data) {
+export function sseEvent(event, data) {
   if (event) return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   return `data: ${JSON.stringify(data)}\n\n`;
+}
+
+export function sseDone() {
+  return 'data: [DONE]\n\n';
 }
 
 const SENSITIVE_CONTENT_REFUSAL_PATTERNS = [
@@ -585,7 +589,7 @@ async function handleChatCompletions(req, res) {
       detachRequestAbort();
     }
     if (!res.destroyed && !res.writableEnded) {
-      res.write(sseEvent(null, '[DONE]'));
+      res.write(sseDone());
       res.end();
     }
   } else {
