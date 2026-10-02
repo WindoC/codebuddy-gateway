@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { createSdkMcpServer, query, tool } from '@tencent-ai/agent-sdk';
+import { createSdkMcpServer, query, tool, unstable_v2_createSession } from '@tencent-ai/agent-sdk';
 import { z } from 'zod';
 
 const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -17,6 +17,7 @@ const MODEL = process.env.CODEBUDDY_GATEWAY_MODEL || undefined;
 const MAX_TURNS = parseInt(process.env.CODEBUDDY_GATEWAY_MAX_TURNS || '30', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_GATEWAY_TIMEOUT || '300000', 10);
 const MODELS_REFRESH_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_GATEWAY_MODELS_TIMEOUT || '5000', 10);
+const MODELS_CACHE_TTL_MS = parseInt(process.env.CODEBUDDY_GATEWAY_MODELS_TTL || '300000', 10);
 const MAX_REQUEST_BODY_BYTES = parseInt(process.env.CODEBUDDY_GATEWAY_MAX_BODY_BYTES || String(10 * 1024 * 1024), 10);
 const EXTERNAL_TOOL_SERVER_NAME = 'openai_client_tools';
 
@@ -43,6 +44,41 @@ if (!SDK_ENV.CODEBUDDY_CODE_PATH) {
 
 if (IS_MAIN) {
   console.log(`[auth] SDK_ENV keys: ${Object.keys(SDK_ENV).join(', ') || '(none)'}`);
+}
+
+// ---------------------------------------------------------------------------
+// Process-level fault containment
+// ---------------------------------------------------------------------------
+// The SDK can emit a floating rejected promise right after a session is torn
+// down. `ProcessTransport` invokes `handleMcpMessageRequest()` without awaiting
+// or catching it, and that function's own catch block calls
+// `sendControlErrorResponse()` -> `writeLine()`, which throws
+// "Transport not started" once the CLI stdin is gone. This happens routinely
+// with external tools: the gateway aborts as soon as it captures a tool call,
+// so late MCP messages from the CLI land on a closed transport.
+// Node's default `--unhandled-rejections=throw` then kills the gateway process
+// and every other in-flight request with it. Register handlers that log and
+// keep serving instead.
+const SDK_TEARDOWN_FAULT = /Transport not started|SDK MCP server not found|transport closed|Command failed|stdout closed/i;
+
+export function isSdkTeardownFault(err) {
+  return SDK_TEARDOWN_FAULT.test(err?.message || String(err));
+}
+
+export function logProcessFault(kind, err) {
+  const message = err?.message || String(err);
+  if (isSdkTeardownFault(err)) {
+    // Expected noise from an already-finished request: warn without a stack.
+    console.warn(`[${kind}] ignored SDK teardown fault: ${message}`);
+    return;
+  }
+  console.error(`[${kind}] ${message}`);
+  if (err?.stack) console.error(err.stack);
+}
+
+export function installProcessGuards() {
+  process.on('unhandledRejection', (err) => logProcessFault('unhandledRejection', err));
+  process.on('uncaughtException', (err) => logProcessFault('uncaughtException', err));
 }
 
 // ---------------------------------------------------------------------------
@@ -344,71 +380,160 @@ function streamToolCallChunk(res, id, model, collector) {
 // ---------------------------------------------------------------------------
 
 // GET /v1/models — return models available to the authenticated user.
-// The list is populated by running `codebuddy --list-models` (or equivalent)
-// via the SDK.  Falls back to a default set if the query fails.
-let cachedModels = null;
+// The list is discovered dynamically from the CodeBuddy CLI through the SDK's
+// `get_available_models` control request, i.e. the very same source the CLI's
+// `/model` picker reads from.  Results are cached for MODELS_CACHE_TTL_MS so a
+// request does not spawn a CLI process every time.
+// The static list below is only a last resort when discovery fails (older CLI,
+// missing auth, timeout) and can be overridden via CODEBUDDY_GATEWAY_MODELS.
+const DEFAULT_FALLBACK_MODELS = [
+  'hy4-preview-f',
+  'hy3',
+  'hy3-x',
+  'space-bunny',
+  'deepseek-v4-pro',
+  'deepseek-v4.1-flash',
+  'glm-5.3',
+  'glm-5.3-flash',
+  'glm-5.2',
+  'glm-5.1',
+  'glm-5v-turbo',
+  'minimax-m3',
+  'minimax-m2.7',
+  'kimi-k3-1',
+  'kimi-k2.8-preview',
+  'kimi-k2.7',
+  'kimi-k2.6',
+];
 
-async function refreshModels() {
-  const abortController = new AbortController();
-  let timeout = null;
+/**
+ * Normalise CLI/SDK model entries into OpenAI `/v1/models` objects.
+ * Accepts plain id strings, or objects shaped like `{ modelId, name }`,
+ * `{ id, name }` or `{ value, displayName }`, keeping first-seen order and
+ * dropping duplicates.
+ */
+export function normalizeModelEntries(entries) {
+  if (!Array.isArray(entries)) return [];
 
-  const discoverModels = async () => {
-    try {
-      const q = query({
-        prompt: '',
-        options: {
-          abortController,
-          maxTurns: 0,
-          permissionMode: 'bypassPermissions',
-          outputFormat: 'text',
-          settingSources: ['user'],
-          env: SDK_ENV,
-        },
-      });
-      // We just need the init message which includes model info.
-      for await (const msg of q) {
-        if (msg.type === 'init') {
-          const models = msg.models || [];
-          if (models.length > 0) {
-            return models.map((m) => ({ id: m, object: 'model', owned_by: 'codebuddy' }));
-          }
-        }
-      }
-    } catch {
-      // fall through to defaults
+  const models = [];
+  const seen = new Set();
+
+  for (const entry of entries) {
+    let id;
+    let displayName;
+
+    if (typeof entry === 'string') {
+      id = entry.trim();
+      displayName = id;
+    } else if (isObject(entry)) {
+      id = String(entry.modelId ?? entry.id ?? entry.value ?? '').trim();
+      displayName = String(entry.name ?? entry.displayName ?? id);
     }
-    return null;
-  };
 
-  const discovery = discoverModels();
-  const timeoutMs = Number.isFinite(MODELS_REFRESH_TIMEOUT_MS) ? MODELS_REFRESH_TIMEOUT_MS : 0;
-  if (timeoutMs <= 0) return discovery;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    models.push({ id, object: 'model', owned_by: 'codebuddy', display_name: displayName });
+  }
 
-  const fallbackOnTimeout = new Promise((resolve) => {
-    timeout = setTimeout(() => {
-      abortWith(abortController, new Error('Model discovery timed out'));
-      resolve(null);
-    }, timeoutMs);
-  });
+  return models;
+}
 
+function closeSession(session) {
   try {
-    return await Promise.race([discovery, fallbackOnTimeout]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
+    session.close();
+  } catch {
+    // already torn down
   }
 }
-async function handleModels(_req, res) {
-  if (!cachedModels) {
-    cachedModels = await refreshModels();
+
+async function loadModelsFromSession(session) {
+  try {
+    const available = await session.getAvailableModels();
+    if (Array.isArray(available) && available.length > 0) {
+      return normalizeModelEntries(available);
+    }
+  } catch {
+    // CLI does not support the simplified payload; fall through to raw.
   }
-  if (!cachedModels || cachedModels.length === 0) {
-    // Fallback to commonly available models
-    cachedModels = [
-      'glm-5.2', 'glm-5.1', 'glm-5.0', 'deepseek-v4-pro',
-      'deepseek-v4-flash', 'kimi-k2.7', 'minimax-m3',
-    ].map((id) => ({ id, object: 'model', owned_by: 'codebuddy' }));
+
+  try {
+    const raw = await session.getAvailableModelsRaw();
+    return normalizeModelEntries(Array.isArray(raw) ? raw : []);
+  } catch {
+    return null;
   }
-  json(res, 200, { object: 'list', data: cachedModels });
+}
+
+/** Ask the CLI for the models currently available to the account. */
+export async function refreshModels(timeoutMs = MODELS_REFRESH_TIMEOUT_MS) {
+  const session = unstable_v2_createSession({
+    permissionMode: 'bypassPermissions',
+    settingSources: ['user'],
+    ...(SDK_ENV.CODEBUDDY_CODE_PATH ? { pathToCodebuddyCode: SDK_ENV.CODEBUDDY_CODE_PATH } : {}),
+    ...(Object.keys(SDK_ENV).length > 0 ? { env: SDK_ENV } : {}),
+  });
+
+  // Swallow rejections: the promise keeps running after a timeout wins the
+  // race, and must not surface as an unhandled rejection.
+  const discovery = loadModelsFromSession(session).catch(() => null);
+  let timeout = null;
+
+  try {
+    const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+    if (effectiveTimeout <= 0) return await discovery;
+
+    const timeoutRace = new Promise((resolve) => {
+      timeout = setTimeout(() => resolve(null), effectiveTimeout);
+    });
+
+    try {
+      return await Promise.race([discovery, timeoutRace]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  } finally {
+    closeSession(session);
+  }
+}
+
+const modelsCache = { data: null, fetchedAt: 0 };
+
+function staticFallbackModels() {
+  const configured = parseCsv(process.env.CODEBUDDY_GATEWAY_MODELS || '');
+  return normalizeModelEntries(configured.length > 0 ? configured : DEFAULT_FALLBACK_MODELS);
+}
+
+/**
+ * Return the cached model list when still fresh, otherwise ask the CLI again.
+ * Discovery failures degrade to the previous successful list, and only then to
+ * the built-in fallback (which is deliberately never cached, so the next call
+ * can recover once the CLI/account is healthy again).
+ */
+export async function getModels({ force = false } = {}) {
+  const now = Date.now();
+  const fresh = modelsCache.data?.length > 0 && now - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS;
+
+  if (fresh && !force) return modelsCache.data;
+
+  const discovered = await refreshModels();
+  if (discovered?.length > 0) {
+    modelsCache.data = discovered;
+    modelsCache.fetchedAt = Date.now();
+    return discovered;
+  }
+  if (modelsCache.data?.length > 0) return modelsCache.data;
+  return staticFallbackModels();
+}
+
+/** Clear the cached model list so the next call re-discovers it. */
+export function resetModelCache() {
+  modelsCache.data = null;
+  modelsCache.fetchedAt = 0;
+}
+
+async function handleModels(req, res) {
+  const force = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
+  json(res, 200, { object: 'list', data: await getModels({ force }) });
 }
 
 // POST /v1/chat/completions
@@ -716,7 +841,8 @@ const ROUTES = {
 // Server
 // ---------------------------------------------------------------------------
 export const server = http.createServer(async (req, res) => {
-  const key = `${req.method} ${req.url}`;
+  const { pathname } = new URL(req.url, 'http://localhost');
+  const key = `${req.method} ${pathname}`;
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -746,6 +872,9 @@ export const server = http.createServer(async (req, res) => {
 server.timeout = REQUEST_TIMEOUT_MS;
 
 if (IS_MAIN) {
+  // Install before anything can schedule async work, so a late SDK rejection
+  // can never take the process down.
+  installProcessGuards();
   server.listen(PORT, HOST, () => {
     console.log(`codebuddy-gateway ready at http://${HOST}:${PORT}`);
     console.log(`  → POST /v1/chat/completions`);

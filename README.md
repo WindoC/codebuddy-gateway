@@ -88,6 +88,8 @@ docker run -d --name codebuddy-gateway \
 | `CODEBUDDY_GATEWAY_MAX_TURNS` | `30` | Max conversation turns |
 | `CODEBUDDY_GATEWAY_TIMEOUT` | `300000` | Request timeout in ms |
 | `CODEBUDDY_GATEWAY_MODELS_TIMEOUT` | `5000` | `/v1/models` SDK discovery timeout in ms before returning fallback models |
+| `CODEBUDDY_GATEWAY_MODELS_TTL` | `300000` | How long a discovered `/v1/models` list is cached in ms |
+| `CODEBUDDY_GATEWAY_MODELS` | — | Comma-separated override for the static fallback model list |
 | `CODEBUDDY_GATEWAY_MAX_BODY_BYTES` | `10485760` | Maximum JSON request body size in bytes |
 
 These env vars are auto-loaded on SSH login via `.bashrc`, `.profile`, and `.bash_profile`.
@@ -273,13 +275,31 @@ Then call the API again with the original assistant `tool_calls` message and the
 curl -s http://127.0.0.1:10532/v1/models
 ```
 
-The endpoint first asks the SDK for model metadata. If discovery does not respond within `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`, it returns the gateway fallback model list instead of leaving the HTTP request hanging.
+The model list is discovered dynamically: the gateway opens a short-lived SDK session and issues the `get_available_models` control request, which is the same source the CodeBuddy CLI's `/model` picker reads from. Results are cached for `CODEBUDDY_GATEWAY_MODELS_TTL` (5 minutes by default).
+
+Add `?refresh=1` to force a re-discovery instead of waiting for the cache to expire:
+
+```bash
+curl -s 'http://127.0.0.1:10532/v1/models?refresh=1'
+```
+
+Discovery is bounded by `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`. If it fails or times out, the gateway serves the previous successful list, and only falls back to a built-in static list when nothing has ever been discovered. Override that last-resort list with `CODEBUDDY_GATEWAY_MODELS`.
 
 ### Health Check
 
 ```bash
 curl -s http://127.0.0.1:10532/health
 ```
+
+### Gateway Logs
+
+When external OpenAI-style tools are used, the gateway aborts the session as soon as it captures a tool call. The CodeBuddy CLI can still push a late MCP message afterwards, and the SDK then raises a harmless but unhandled `Transport not started` rejection. Node's default behaviour would kill the whole gateway process, so the gateway installs guards that log and keep serving. Expect lines like these in normal operation:
+
+```text
+[unhandledRejection] ignored SDK teardown fault: Transport not started
+```
+
+They are warnings, not failures. Faults that are *not* recognised as SDK teardown noise are logged at `error` level with a full stack.
 
 ### Using with OpenAI SDK
 
