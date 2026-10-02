@@ -35,7 +35,7 @@ node --check gateway/server.mjs
 - Do not point SDK startup at `/usr/local/bin/codebuddy`; the SDK resolves `dist/codebuddy-headless.js` relative to the provided path and the symlink path resolves incorrectly.
 - Treat request model `codebuddy` as a gateway alias. Do not pass it through to the CodeBuddy CLI as a model id.
 - REST API built-in CodeBuddy tools are disabled by default. External OpenAI-style `tools` are exposed as request-scoped SDK MCP tools and returned to clients as OpenAI-compatible `tool_calls`.
-- `/v1/models` uses bounded SDK model discovery and falls back to the gateway default model list after `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`.
+- `/v1/models` discovers models dynamically via the SDK `get_available_models` control request (same source as the CLI `/model` list), caches them for `CODEBUDDY_GATEWAY_MODELS_TTL`, and falls back to the gateway default list only when discovery fails or exceeds `CODEBUDDY_GATEWAY_MODELS_TIMEOUT`. `?refresh=1` forces re-discovery.
 
 ## Docker Verification
 

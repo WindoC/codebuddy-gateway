@@ -7,9 +7,13 @@ import {
   attachRequestAbort,
   captureToolUseBlocks,
   createToolCallCollector,
+  installProcessGuards,
+  isSdkTeardownFault,
   isSensitiveContentRefusal,
   jsonSchemaObjectToZodShape,
+  logProcessFault,
   messagesToPrompt,
+  normalizeModelEntries,
   normalizeOpenAiTools,
   parseCsv,
   readBody,
@@ -88,6 +92,49 @@ test('normalizeOpenAiTools keeps only valid function tools', () => {
       },
     },
   ]);
+});
+
+test('normalizeModelEntries maps CLI model entries to OpenAI model objects', () => {
+  assert.deepEqual(normalizeModelEntries([
+    { modelId: 'hy4-preview-f', name: 'Hy4 preview', description: 'flagship' },
+    { modelId: 'glm-5.3', name: 'GLM-5.3' },
+  ]), [
+    { id: 'hy4-preview-f', object: 'model', owned_by: 'codebuddy', display_name: 'Hy4 preview' },
+    { id: 'glm-5.3', object: 'model', owned_by: 'codebuddy', display_name: 'GLM-5.3' },
+  ]);
+
+  // Raw language models carry the id on `id` instead of `modelId`.
+  assert.deepEqual(normalizeModelEntries([{ id: 'kimi-k2.7', name: 'Kimi-K2.7-Code' }]), [
+    { id: 'kimi-k2.7', object: 'model', owned_by: 'codebuddy', display_name: 'Kimi-K2.7-Code' },
+  ]);
+
+  // Legacy ModelInfo entries use `value` / `displayName`.
+  assert.deepEqual(normalizeModelEntries([{ value: 'hy3', displayName: 'Hy3' }]), [
+    { id: 'hy3', object: 'model', owned_by: 'codebuddy', display_name: 'Hy3' },
+  ]);
+
+  // Plain strings fall back to using the id as its own display name.
+  assert.deepEqual(normalizeModelEntries([' minimax-m3 ', 'space-bunny ']), [
+    { id: 'minimax-m3', object: 'model', owned_by: 'codebuddy', display_name: 'minimax-m3' },
+    { id: 'space-bunny', object: 'model', owned_by: 'codebuddy', display_name: 'space-bunny' },
+  ]);
+});
+
+test('normalizeModelEntries deduplicates and ignores unusable entries', () => {
+  assert.deepEqual(normalizeModelEntries([
+    { modelId: 'glm-5.2', name: 'GLM-5.2' },
+    { modelId: 'glm-5.2', name: 'GLM-5.2 (duplicate)' },
+    { modelId: '', name: 'no id' },
+    { name: 'missing id entirely' },
+    null,
+    undefined,
+    42,
+  ]), [
+    { id: 'glm-5.2', object: 'model', owned_by: 'codebuddy', display_name: 'GLM-5.2' },
+  ]);
+
+  assert.deepEqual(normalizeModelEntries(null), []);
+  assert.deepEqual(normalizeModelEntries([]), []);
 });
 
 test('jsonSchemaObjectToZodShape converts required and optional properties', () => {
@@ -200,6 +247,38 @@ test('readBody rejects oversized request bodies', async () => {
 
   await assert.rejects(bodyPromise, RequestBodyTooLargeError);
   assert.equal(req.destroyed, true);
+});
+
+test('isSdkTeardownFault recognises transport teardown noise', () => {
+  assert.equal(isSdkTeardownFault(new Error('Transport not started')), true);
+  assert.equal(isSdkTeardownFault(new Error('SDK MCP server not found: openai_client_tools')), true);
+  assert.equal(isSdkTeardownFault({ message: 'transport closed' }), true);
+  // Genuine application errors must still be treated as faults.
+  assert.equal(isSdkTeardownFault(new Error('Cannot read properties of undefined')), false);
+  assert.equal(isSdkTeardownFault(undefined), false);
+});
+
+test('logProcessFault never throws, whatever it is handed', () => {
+  // This is the whole point: a guard that itself crashes is useless.
+  const originals = { warn: console.warn, error: console.error };
+  const lines = [];
+  console.warn = (...args) => lines.push(['warn', ...args]);
+  console.error = (...args) => lines.push(['error', ...args]);
+
+  try {
+    assert.doesNotThrow(() => logProcessFault('unhandledRejection', new Error('Transport not started')));
+    assert.doesNotThrow(() => logProcessFault('uncaughtException', new Error('boom')));
+    assert.doesNotThrow(() => logProcessFault('unhandledRejection', undefined));
+    assert.doesNotThrow(() => logProcessFault('unhandledRejection', 'plain string'));
+  } finally {
+    console.warn = originals.warn;
+    console.error = originals.error;
+  }
+
+  // Known teardown noise is downgraded to a warning; everything else is an error.
+  const levels = lines.map(([level]) => level);
+  assert.equal(levels[0], 'warn');
+  assert.equal(levels[1], 'error');
 });
 
 test('attachRequestAbort aborts on client disconnect and detaches listeners', () => {
