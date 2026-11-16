@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+FROM node:22.23.5-bookworm
 
 ARG CODEBUDDY_UID=1000
 ARG CODEBUDDY_GID=1000
